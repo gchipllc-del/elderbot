@@ -30,7 +30,7 @@ import {
   type ThreadConfig,
 } from "../threads/registry.js";
 import { formatContextSummary, setActiveProject } from "../threads/context.js";
-import { chat, clearHistory, getHistoryLength } from "../ai/claude.js";
+import { chat, clearHistory, getHistoryLength, getCurrentModel } from "../ai/claude.js";
 
 type SendOptions = { message_thread_id?: number };
 
@@ -375,7 +375,7 @@ function formatStatus(domain: string): string {
     `Owner ID: ${env.TELEGRAM_OWNER_CHAT_ID ? "configured" : "NOT SET"}`,
     `Current thread: ${domain}`,
     "",
-    "Week 4: Multi-Threaded Conversations — Active",
+    `AI Model: ${getCurrentModel()}`,
     "Memory search: online",
     "Heartbeat: running",
     "Cron jobs: 4 scheduled",

@@ -1,15 +1,16 @@
 /**
- * Claude AI conversation handler.
+ * Elderbot AI conversation handler.
  *
- * Handles free-form messages using claude-opus-4-6 with:
- * - CLAUDE.md as the cached system prompt
+ * Routes free-form messages through OpenRouter (free tier) using:
+ * - Meta Llama 3.3 70B as primary model (free, high quality)
+ * - CLAUDE.md as the system prompt
  * - Per-thread conversation history
- * - Memory context from recent notes + search
- * - Adaptive thinking for complex queries
- * - Streaming responses sent to Telegram
+ * - Memory context from daily notes + search
+ *
+ * When Elderbot earns revenue, can upgrade to Claude API by
+ * setting ANTHROPIC_API_KEY and switching the provider.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import { readFile } from "fs/promises";
 import { resolve } from "path";
 import { env } from "../config/env.js";
@@ -17,20 +18,42 @@ import { search } from "../memory/search.js";
 import { getTodaySummary } from "../memory/daily-notes.js";
 import { logSecurity } from "../security/audit-log.js";
 
-const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
+// --- Model configuration ---
 
-// Conversation history per thread — keyed by "chatId:threadId" or "chatId:dm"
-type MessageParam = Anthropic.Messages.MessageParam;
-const histories = new Map<string, MessageParam[]>();
+interface ModelConfig {
+  id: string;
+  name: string;
+  contextWindow: number;
+}
 
-// Cache CLAUDE.md in memory after first load
+// Free models ranked by quality — falls back down the list if one fails
+const FREE_MODELS: ModelConfig[] = [
+  { id: "meta-llama/llama-3.3-70b-instruct:free", name: "Llama 3.3 70B", contextWindow: 65536 },
+  { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B", contextWindow: 131072 },
+  { id: "nousresearch/hermes-3-llama-3.1-405b:free", name: "Hermes 3 405B", contextWindow: 131072 },
+  { id: "qwen/qwen3-coder:free", name: "Qwen3 Coder", contextWindow: 262144 },
+];
+
+const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
+
+// --- Conversation history ---
+
+interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+const histories = new Map<string, ChatMessage[]>();
+
 let systemPromptCache: string | null = null;
 
-const MAX_HISTORY = 20; // Keep last 20 turns per thread
+const MAX_HISTORY = 20; // Last 20 turns per thread
 
 function historyKey(chatId: number, threadId?: number): string {
   return threadId ? `${chatId}:${threadId}` : `${chatId}:dm`;
 }
+
+// --- System prompt ---
 
 async function loadSystemPrompt(): Promise<string> {
   if (systemPromptCache) return systemPromptCache;
@@ -48,7 +71,8 @@ async function loadSystemPrompt(): Promise<string> {
   return systemPromptCache;
 }
 
-/** Build a memory context block from today's notes + search results */
+// --- Memory context ---
+
 async function buildMemoryContext(userMessage: string): Promise<string> {
   const parts: string[] = [];
 
@@ -59,7 +83,7 @@ async function buildMemoryContext(userMessage: string): Promise<string> {
       parts.push(`## Today's Log\n${todaySummary}`);
     }
   } catch {
-    // Non-fatal — skip
+    // Non-fatal
   }
 
   // Relevant memory search (only if message is substantive)
@@ -79,7 +103,7 @@ async function buildMemoryContext(userMessage: string): Promise<string> {
         parts.push(`## Relevant Memory\n${snippets}`);
       }
     } catch {
-      // Non-fatal — skip
+      // Non-fatal
     }
   }
 
@@ -88,8 +112,78 @@ async function buildMemoryContext(userMessage: string): Promise<string> {
     : "";
 }
 
+// --- OpenRouter API call ---
+
+async function callOpenRouter(
+  messages: ChatMessage[],
+  modelIndex = 0
+): Promise<string> {
+  const model = FREE_MODELS[modelIndex];
+  if (!model) throw new Error("All free models failed. Try again later.");
+
+  const response = await fetch(OPENROUTER_BASE, {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://elderbot.app",
+      "X-Title": "Elderbot",
+    },
+    body: JSON.stringify({
+      model: model.id,
+      messages,
+      max_tokens: 2048,
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text();
+    logSecurity("COMMAND_EXECUTED", `OpenRouter ${model.name} error: ${response.status}`, {
+      body: errBody.substring(0, 200),
+    });
+
+    // If this model failed, try the next one
+    if (modelIndex < FREE_MODELS.length - 1) {
+      logSecurity("COMMAND_EXECUTED", `Falling back to ${FREE_MODELS[modelIndex + 1].name}`);
+      return callOpenRouter(messages, modelIndex + 1);
+    }
+
+    throw new Error(`OpenRouter API error (${response.status}): ${errBody.substring(0, 150)}`);
+  }
+
+  const data = await response.json() as {
+    choices?: Array<{ message?: { content?: string } }>;
+    error?: { message?: string };
+  };
+
+  if (data.error) {
+    // Model-specific error — try fallback
+    if (modelIndex < FREE_MODELS.length - 1) {
+      logSecurity("COMMAND_EXECUTED", `${model.name} returned error, falling back`, {
+        error: data.error.message ?? "unknown",
+      });
+      return callOpenRouter(messages, modelIndex + 1);
+    }
+    throw new Error(data.error.message ?? "Unknown OpenRouter error");
+  }
+
+  const assistantText = data.choices?.[0]?.message?.content;
+  if (!assistantText) {
+    throw new Error("Empty response from OpenRouter");
+  }
+
+  logSecurity("COMMAND_EXECUTED", `Response from ${model.name}`, {
+    chars: String(assistantText.length),
+  });
+
+  return assistantText;
+}
+
+// --- Public API ---
+
 /**
- * Send a free-form message to Claude and return the response text.
+ * Send a free-form message and return the AI response.
  * Maintains per-thread conversation history.
  */
 export async function chat(
@@ -99,95 +193,65 @@ export async function chat(
   domain?: string
 ): Promise<string> {
   const key = historyKey(chatId, threadId);
-
-  // Load conversation history
   const history = histories.get(key) ?? [];
 
   // Build memory context
   const memoryContext = await buildMemoryContext(userMessage);
 
-  // Compose the user turn (with memory prepended if available)
+  // Compose user turn with memory context
   const userContent = memoryContext
     ? `${memoryContext}${userMessage}`
     : userMessage;
 
-  // Add to history
+  // Add user message to history
   history.push({ role: "user", content: userContent });
 
-  // Trim history to max length (keep pairs)
+  // Trim history (keep pairs)
   while (history.length > MAX_HISTORY) {
     history.splice(0, 2);
   }
 
   histories.set(key, history);
 
-  // Load system prompt (cached after first call)
+  // Load system prompt
   const systemPrompt = await loadSystemPrompt();
-
-  // Thread context suffix
   const threadContext = domain && domain !== "dm"
     ? `\n\nYou are currently operating in the [${domain}] thread. Tailor your responses to that domain's focus.`
     : "";
 
+  // Build full message array with system prompt
+  const messages: ChatMessage[] = [
+    { role: "system", content: systemPrompt + threadContext },
+    ...history,
+  ];
+
   try {
-    logSecurity("COMMAND_EXECUTED", "Sending message to Claude API", {
+    logSecurity("COMMAND_EXECUTED", "Sending message to OpenRouter", {
       thread: domain ?? "dm",
       chars: String(userMessage.length),
+      model: FREE_MODELS[0].name,
     });
 
-    // Use streaming to avoid timeout on long responses
-    const stream = client.messages.stream({
-      model: "claude-opus-4-6",
-      max_tokens: 4096,
-      thinking: { type: "adaptive" },
-      system: [
-        {
-          type: "text",
-          text: systemPrompt + threadContext,
-          // Prompt caching — CLAUDE.md rarely changes
-          cache_control: { type: "ephemeral" },
-        },
-      ],
-      messages: history,
-    });
+    const assistantText = await callOpenRouter(messages);
 
-    const response = await stream.finalMessage();
-
-    // Extract text from response content
-    let assistantText = "";
-    for (const block of response.content) {
-      if (block.type === "text") {
-        assistantText += block.text;
-      }
-    }
-
-    if (!assistantText) {
-      assistantText = "(No response generated)";
-    }
-
-    // Append assistant response to history
+    // Save assistant response to history
     history.push({ role: "assistant", content: assistantText });
     histories.set(key, history);
-
-    logSecurity("COMMAND_EXECUTED", "Claude API response received", {
-      thread: domain ?? "dm",
-      responseChars: String(assistantText.length),
-    });
 
     return assistantText;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    logSecurity("COMMAND_EXECUTED", `Claude API error: ${msg}`);
+    logSecurity("COMMAND_EXECUTED", `AI error: ${msg}`);
 
-    // Remove the failed user turn from history so it doesn't corrupt state
+    // Remove failed user turn
     history.pop();
     histories.set(key, history);
 
-    throw new Error(`Claude API error: ${msg}`);
+    throw new Error(`AI error: ${msg}`);
   }
 }
 
-/** Clear conversation history for a thread (useful for /reset or new sessions) */
+/** Clear conversation history for a thread */
 export function clearHistory(chatId: number, threadId?: number): void {
   const key = historyKey(chatId, threadId);
   histories.delete(key);
@@ -197,4 +261,9 @@ export function clearHistory(chatId: number, threadId?: number): void {
 export function getHistoryLength(chatId: number, threadId?: number): number {
   const key = historyKey(chatId, threadId);
   return histories.get(key)?.length ?? 0;
+}
+
+/** Get current model info */
+export function getCurrentModel(): string {
+  return `${FREE_MODELS[0].name} (via OpenRouter free tier)`;
 }
