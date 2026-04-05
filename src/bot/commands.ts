@@ -5,15 +5,23 @@
 import TelegramBot from "node-telegram-bot-api";
 import { search, formatSearchResults } from "../memory/search.js";
 import {
-  readTodayNote,
   addNote,
   getTodaySummary,
   listRecentNotes,
 } from "../memory/daily-notes.js";
-import { getTacitSummary, addLesson, addPreference } from "../memory/tacit.js";
+import { addLesson, addPreference } from "../memory/tacit.js";
 import { consolidate, formatReport } from "../memory/consolidate.js";
 import { logSecurity } from "../security/audit-log.js";
 import { env } from "../config/env.js";
+import { getCronStatus } from "../cron/scheduler.js";
+import {
+  startSession,
+  completeSession,
+  getActiveSessions,
+  formatSessions,
+} from "../cron/sessions.js";
+import { runHeartbeat } from "../cron/heartbeat.js";
+import { sendMorningBriefing } from "../cron/briefing.js";
 
 export async function handleCommand(
   bot: TelegramBot,
@@ -25,22 +33,30 @@ export async function handleCommand(
 
   switch (cmd) {
     case "/start":
-      await bot.sendMessage(chatId, "ElderBot online. Security-first. Ready for commands.\n\nCommands:\n/status — system status\n/security — security status\n/today — today's daily note summary\n/note <text> — add a note\n/recall <query> — search memory\n/memory — memory system status\n/lesson <text> — log a lesson learned\n/pref <text> — log a preference\n/consolidate — run nightly consolidation now\n/help — show this list");
-      break;
-
     case "/help":
       await bot.sendMessage(chatId, [
         "ElderBot Commands",
         "---",
-        "/status — system status",
-        "/security — security channel status",
+        "Memory:",
         "/today — today's daily note summary",
-        "/note <text> — add a note to today",
+        "/note <text> — add a note",
         "/recall <query> — search all memory",
         "/memory — memory system status",
         "/lesson <text> — log a lesson learned",
-        "/pref <text> — log a preference or pattern",
+        "/pref <text> — log a preference",
         "/consolidate — run nightly consolidation now",
+        "",
+        "Sessions & Crons:",
+        "/sessions — list active sessions",
+        "/session start <name> — start a tracked session",
+        "/session done <id> — mark session complete",
+        "/crons — show all cron jobs and status",
+        "/heartbeat — run heartbeat check now",
+        "/briefing — send morning briefing now",
+        "",
+        "System:",
+        "/status — system status",
+        "/security — security channel status",
       ].join("\n"));
       break;
 
@@ -127,6 +143,54 @@ export async function handleCommand(
       }
       break;
     }
+
+    case "/crons":
+      await bot.sendMessage(chatId, getCronStatus());
+      break;
+
+    case "/sessions": {
+      const sessions = await getActiveSessions();
+      await bot.sendMessage(chatId, `Active Sessions:\n---\n${formatSessions(sessions)}`);
+      break;
+    }
+
+    case "/session": {
+      const [subCmd, ...rest] = args;
+      const sessionArg = rest.join(" ");
+
+      if (subCmd === "start") {
+        if (!sessionArg) {
+          await bot.sendMessage(chatId, "Usage: /session start <name>");
+          return;
+        }
+        const session = await startSession(sessionArg, `Started via Telegram`);
+        await bot.sendMessage(chatId, `Session started: "${session.name}"\nID: ${session.id}\nWorkspace: ~/elderbot/${session.workspace}`);
+      } else if (subCmd === "done") {
+        if (!sessionArg) {
+          await bot.sendMessage(chatId, "Usage: /session done <session-id>");
+          return;
+        }
+        await completeSession(sessionArg);
+        await bot.sendMessage(chatId, `Session marked complete: ${sessionArg}`);
+      } else {
+        await bot.sendMessage(chatId, "Usage:\n/session start <name>\n/session done <id>");
+      }
+      break;
+    }
+
+    case "/heartbeat": {
+      await bot.sendMessage(chatId, "Running heartbeat check...");
+      await runHeartbeat(bot);
+      const sessions = await getActiveSessions();
+      if (sessions.length === 0) {
+        await bot.sendMessage(chatId, "Heartbeat complete. No issues found. No active sessions.");
+      }
+      break;
+    }
+
+    case "/briefing":
+      await sendMorningBriefing(bot);
+      break;
 
     default:
       // Not a slash command — treat as a note

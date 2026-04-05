@@ -1,19 +1,51 @@
 # ElderBot Cron Configuration
-# All scheduled jobs defined here — bot cannot create new jobs without approval
-# Full implementation in Week 3: Heartbeat & Cron Jobs
+# Single source of truth for all scheduled jobs.
+# Bot cannot create new jobs without Jesse's approval via Telegram.
+# Full runtime registry lives in src/cron/scheduler.ts
 
-jobs: []
-  # - name: heartbeat
-  #   schedule: "*/30 6-22 * * *"
-  #   command: "check active projects, restart dead sessions, report completions"
-  #   enabled: false
+jobs:
+  - name: heartbeat
+    schedule: "*/30 6-22 * * *"
+    description: "Check active sessions, report issues to Telegram"
+    enabled: true
 
-  # - name: morning-briefing
-  #   schedule: "0 6 * * *"
-  #   command: "send daily status to Telegram"
-  #   enabled: false
+  - name: morning-briefing
+    schedule: "0 8 * * *"
+    description: "Daily status summary → Telegram at 8 AM"
+    enabled: true
 
-  # - name: nightly-consolidation
-  #   schedule: "0 2 * * *"
-  #   command: "review conversations, update memory, re-index"
-  #   enabled: false
+  - name: nightly-consolidation
+    schedule: "0 2 * * *"
+    description: "Review day, update memory files, re-index at 2 AM"
+    enabled: true
+
+  - name: security-review
+    schedule: "0 6 * * *"
+    description: "Review security log at 6 AM before morning briefing"
+    enabled: true
+
+# Future jobs (Week 5+):
+#  - name: revenue-check
+#    schedule: "0 8,12,16,20 * * *"
+#    description: "Check Stripe revenue, alert if notable"
+#    enabled: false
+#
+#  - name: x-mentions
+#    schedule: "0 8-20/2 * * *"
+#    description: "Check X/Twitter mentions, draft replies"
+#    enabled: false
+#
+#  - name: email-check
+#    schedule: "0 9,13,17 * * *"
+#    description: "Summarize new emails, draft replies for review"
+#    enabled: false
+#
+#  - name: content-generation
+#    schedule: "0 10,15 * * *"
+#    description: "Draft tweets from recent conversations"
+#    enabled: false
+#
+#  - name: weekly-review
+#    schedule: "0 20 * * 0"
+#    description: "Weekly review: revenue, products, growth, wins/blockers"
+#    enabled: false
