@@ -1,0 +1,29 @@
+Start the bot, then test each feature from Telegram. Here's the full test checklist:
+
+1. Start the bot
+
+cd ~/elderbot && bun run dev
+
+2. Send these commands in Telegram:
+
+/help          → should show all commands
+/status        → uptime, environment, owner ID configured
+/security      → channel auth status
+/today         → today's daily note summary
+/note hello world   → saves a note, check /today after
+/recall elderbot    → searches memory, should find project files
+/memory        → shows indexed file count (should be 10+ files)
+/crons         → shows 4 jobs: heartbeat, briefing, consolidation, security-review
+/sessions      → should say "No active sessions"
+/session start test-project   → creates a session
+/sessions      → should now show the test session
+/briefing      → sends you the morning briefing right now
+/heartbeat     → runs a heartbeat check
+/consolidate   → runs nightly consolidation manually
+/lesson always test before pushing   → logs to tacit knowledge
+
+3. Check the audit log (in a second terminal):
+
+tail -f ~/elderbot/logs/security.log
+
+You should see every command logged with timestamps.
