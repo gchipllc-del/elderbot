@@ -9,6 +9,7 @@ config({ path: secretsPath });
 export const env = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN ?? "",
   TELEGRAM_OWNER_CHAT_ID: process.env.TELEGRAM_OWNER_CHAT_ID ?? "",
+  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? "",
   NODE_ENV: process.env.NODE_ENV ?? "development",
   ELDERBOT_HOME: resolve(homedir(), "elderbot"),
 } as const;

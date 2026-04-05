@@ -30,6 +30,7 @@ import {
   type ThreadConfig,
 } from "../threads/registry.js";
 import { formatContextSummary, setActiveProject } from "../threads/context.js";
+import { chat, clearHistory, getHistoryLength } from "../ai/claude.js";
 
 type SendOptions = { message_thread_id?: number };
 
@@ -45,7 +46,19 @@ export async function handleCommand(
   const opts: SendOptions = threadId ? { message_thread_id: threadId } : {};
   const domain = threadConfig?.domain ?? "dm";
 
-  const reply = (msg: string) => bot.sendMessage(chatId, msg, opts);
+  // Fall back to plain message if topic is closed or thread ID is invalid
+  const reply = async (msg: string) => {
+    try {
+      await bot.sendMessage(chatId, msg, opts);
+    } catch (err) {
+      const e = err as Error;
+      if (e.message?.includes("TOPIC_CLOSED") || e.message?.includes("thread")) {
+        await bot.sendMessage(chatId, msg);
+      } else {
+        throw err;
+      }
+    }
+  };
 
   switch (cmd) {
     case "/start":
@@ -79,6 +92,9 @@ export async function handleCommand(
         "System:",
         "/status — system status",
         "/security — security channel status",
+        "/reset — clear AI conversation history for this thread",
+        "",
+        "Or just send any message to chat with Elderbot AI.",
       ].join("\n"));
       break;
 
@@ -276,11 +292,75 @@ export async function handleCommand(
       break;
     }
 
-    default:
-      await reply(
-        `Not a recognized command. Use /help to see commands.\n\nTo save a note: /note ${text}`
-      );
+    case "/reset": {
+      clearHistory(chatId, threadId);
+      await reply("Conversation history cleared. Starting fresh.");
+      break;
+    }
+
+    default: {
+      // Route all non-command messages (and unrecognized commands) to Claude AI
+      const isCommand = text.startsWith("/");
+      const thinkingMsg = isCommand
+        ? `Unknown command: ${cmd}\nRouting to AI...\n`
+        : "";
+
+      if (thinkingMsg) await reply(thinkingMsg).catch(() => {});
+
+      try {
+        const histLen = getHistoryLength(chatId, threadId);
+        logSecurity("COMMAND_EXECUTED", "Routing to Claude AI", {
+          thread: domain,
+          historyTurns: String(histLen),
+          chars: String(text.length),
+        });
+
+        const aiResponse = await chat(text, chatId, threadId, domain);
+
+        // Telegram has a 4096 char limit per message — split if needed
+        if (aiResponse.length <= 4096) {
+          await reply(aiResponse);
+        } else {
+          const chunks = splitMessage(aiResponse, 4000);
+          for (const chunk of chunks) {
+            await reply(chunk);
+          }
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        await reply(`AI error: ${errMsg}\n\nTip: Use /help to see available commands.`);
+      }
+      break;
+    }
   }
+}
+
+/** Split a long message into chunks at paragraph/sentence boundaries */
+function splitMessage(text: string, maxLen: number): string[] {
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    // Try to split at a paragraph break
+    let splitAt = remaining.lastIndexOf("\n\n", maxLen);
+    if (splitAt < maxLen / 2) {
+      // Fall back to newline
+      splitAt = remaining.lastIndexOf("\n", maxLen);
+    }
+    if (splitAt < maxLen / 2) {
+      // Fall back to space
+      splitAt = remaining.lastIndexOf(" ", maxLen);
+    }
+    if (splitAt < 0) {
+      splitAt = maxLen;
+    }
+
+    chunks.push(remaining.substring(0, splitAt).trim());
+    remaining = remaining.substring(splitAt).trim();
+  }
+
+  if (remaining) chunks.push(remaining);
+  return chunks;
 }
 
 function formatStatus(domain: string): string {

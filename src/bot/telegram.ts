@@ -83,11 +83,15 @@ export function createBot(): TelegramBot {
         "Command attempted in security thread — ignored",
         { text: text.substring(0, 100), threadId }
       );
-      await bot.sendMessage(
-        chatId,
-        "Security thread is report-only. Commands are not executed here.\n\nUse the General thread for commands.",
-        { message_thread_id: threadId }
-      );
+      try {
+        await bot.sendMessage(
+          chatId,
+          "Security thread is report-only. Commands are not executed here.\n\nUse the General thread for commands.",
+          { message_thread_id: threadId }
+        );
+      } catch {
+        logSecurityWarning("COMMAND_EXECUTED", "Failed to reply in security thread (topic may be closed)");
+      }
       return;
     }
 
@@ -105,11 +109,20 @@ export function createBot(): TelegramBot {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logSecurityWarning("COMMAND_EXECUTED", `Command error: ${message}`);
-      await bot.sendMessage(
-        chatId,
-        `Error: ${message}`,
-        threadId ? { message_thread_id: threadId } : undefined
-      );
+      // If topic is closed or thread invalid, fall back to plain message
+      try {
+        await bot.sendMessage(
+          chatId,
+          `Error: ${message}`,
+          threadId ? { message_thread_id: threadId } : undefined
+        );
+      } catch {
+        try {
+          await bot.sendMessage(chatId, `Error: ${message}`);
+        } catch {
+          logSecurityWarning("COMMAND_EXECUTED", `Failed to send error reply: ${message}`);
+        }
+      }
     }
   });
 
