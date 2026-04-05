@@ -32,6 +32,13 @@ const FREE_MODELS: ModelConfig[] = [
   { id: "google/gemma-3-27b-it:free", name: "Gemma 3 27B", contextWindow: 131072 },
   { id: "nousresearch/hermes-3-llama-3.1-405b:free", name: "Hermes 3 405B", contextWindow: 131072 },
   { id: "qwen/qwen3-coder:free", name: "Qwen3 Coder", contextWindow: 262144 },
+  { id: "qwen/qwen3.6-plus:free", name: "Qwen 3.6 Plus", contextWindow: 1048576 },
+  { id: "nvidia/nemotron-3-super-120b-a12b:free", name: "Nemotron 120B", contextWindow: 262144 },
+  { id: "google/gemma-3-12b-it:free", name: "Gemma 3 12B", contextWindow: 32768 },
+  { id: "openai/gpt-oss-120b:free", name: "GPT-OSS 120B", contextWindow: 131072 },
+  { id: "meta-llama/llama-3.2-3b-instruct:free", name: "Llama 3.2 3B", contextWindow: 131072 },
+  // Ultimate fallback — OpenRouter picks whichever free model is available
+  { id: "openrouter/auto", name: "OpenRouter Auto", contextWindow: 32768 },
 ];
 
 const OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions";
@@ -143,13 +150,18 @@ async function callOpenRouter(
       body: errBody.substring(0, 200),
     });
 
-    // If this model failed, try the next one
+    // If this model failed (rate limit or other), try the next one
     if (modelIndex < FREE_MODELS.length - 1) {
-      logSecurity("COMMAND_EXECUTED", `Falling back to ${FREE_MODELS[modelIndex + 1].name}`);
+      const nextModel = FREE_MODELS[modelIndex + 1];
+      logSecurity("COMMAND_EXECUTED", `Falling back to ${nextModel.name}`);
+      // Brief pause on 429 to avoid hammering
+      if (response.status === 429) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
       return callOpenRouter(messages, modelIndex + 1);
     }
 
-    throw new Error(`OpenRouter API error (${response.status}): ${errBody.substring(0, 150)}`);
+    throw new Error(`All models busy — try again in a minute.`);
   }
 
   const data = await response.json() as {

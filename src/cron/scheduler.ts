@@ -17,6 +17,7 @@ import TelegramBot from "node-telegram-bot-api";
 import { runHeartbeat } from "./heartbeat.js";
 import { sendMorningBriefing } from "./briefing.js";
 import { consolidate } from "../memory/consolidate.js";
+import { sendDailySalesReport } from "./sales-report.js";
 import { logSecurity } from "../security/audit-log.js";
 import { env } from "../config/env.js";
 
@@ -56,6 +57,13 @@ const jobRegistry: CronJob[] = [
     name: "security-review",
     schedule: "0 6 * * *",
     description: "Review security log before morning briefing",
+    enabled: true,
+    runCount: 0,
+  },
+  {
+    name: "daily-sales-report",
+    schedule: "0 20 * * *",
+    description: "Revenue summary → Telegram at 8 PM",
     enabled: true,
     runCount: 0,
   },
@@ -127,6 +135,18 @@ export function startAllCrons(bot: TelegramBot): void {
       cron.schedule("0 6 * * *", () => {
         markRun("security-review");
         logSecurity("COMMAND_EXECUTED", "Security review running");
+      })
+    );
+  }
+
+  // Daily sales report — 8 PM
+  if (jobRegistry.find((j) => j.name === "daily-sales-report")?.enabled) {
+    activeTasks.push(
+      cron.schedule("0 20 * * *", async () => {
+        markRun("daily-sales-report");
+        await sendDailySalesReport(bot).catch((e) =>
+          logSecurity("COMMAND_EXECUTED", `Sales report error: ${e.message}`)
+        );
       })
     );
   }

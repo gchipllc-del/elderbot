@@ -31,6 +31,17 @@ import {
 } from "../threads/registry.js";
 import { formatContextSummary, setActiveProject } from "../threads/context.js";
 import { chat, clearHistory, getHistoryLength, getCurrentModel } from "../ai/claude.js";
+import {
+  createProduct,
+  listProducts,
+  archiveProduct,
+  getProduct,
+  formatProductList,
+} from "../products/store.js";
+import { createSquareCheckout, isSquareConfigured } from "../payments/square.js";
+import { createCoinbaseCharge, isCoinbaseConfigured } from "../payments/coinbase.js";
+import { checkSpendingLimit } from "../payments/guardrails.js";
+import { generateDailyReport, generateRevenueSummary } from "../payments/reporting.js";
 
 type SendOptions = { message_thread_id?: number };
 
@@ -88,6 +99,14 @@ export async function handleCommand(
         "/thread register <domain> — register this thread",
         "/thread context — show active thread contexts",
         "/project <name> — set active project for this thread",
+        "",
+        "Business:",
+        "/product create <name> | <price> | <desc> — create a product",
+        "/product list — list all products",
+        "/product archive <id> — archive a product",
+        "/checkout <product-id> — generate payment links",
+        "/sales — today's sales report",
+        "/revenue — full revenue dashboard",
         "",
         "System:",
         "/status — system status",
@@ -298,6 +317,116 @@ export async function handleCommand(
       break;
     }
 
+    // ---- Business Commands ----
+
+    case "/product": {
+      const [subCmd, ...rest] = args;
+
+      if (subCmd === "create") {
+        // Format: /product create Name | Price | Description
+        const parts = rest.join(" ").split("|").map((s) => s.trim());
+        if (parts.length < 2) {
+          await reply("Usage: /product create Name | Price | Description\nExample: /product create Elder Tech Guide | 9.99 | Simple tech guide for seniors");
+          break;
+        }
+        const [name, priceStr, ...descParts] = parts;
+        const price = parseFloat(priceStr);
+        if (isNaN(price) || price <= 0) {
+          await reply("Price must be a positive number.");
+          break;
+        }
+        const description = descParts.join(" | ") || `${name} by Elderbot`;
+        const product = await createProduct(name, price, description);
+        await reply(`Product created!\n\nName: ${product.name}\nPrice: $${product.priceUsd.toFixed(2)}\nID: ${product.id}\n\nGenerate payment links with: /checkout ${product.id}`);
+      } else if (subCmd === "list") {
+        const products = await listProducts(arg.includes("all"));
+        await reply(formatProductList(products));
+      } else if (subCmd === "archive") {
+        const productId = rest[0];
+        if (!productId) {
+          await reply("Usage: /product archive <product-id>");
+          break;
+        }
+        const success = await archiveProduct(productId);
+        await reply(success ? `Product ${productId} archived.` : `Product not found: ${productId}`);
+      } else {
+        await reply("Usage: /product create|list|archive");
+      }
+      break;
+    }
+
+    case "/checkout": {
+      const productId = args[0];
+      const forceProvider = args[1]; // optional: "square" or "crypto"
+
+      if (!productId) {
+        await reply("Usage: /checkout <product-id> [square|crypto]");
+        break;
+      }
+
+      const product = await getProduct(productId);
+      if (!product) {
+        await reply(`Product not found: ${productId}\nUse /product list to see available products.`);
+        break;
+      }
+
+      // Guardrail check
+      const check = await checkSpendingLimit(product.priceUsd);
+      if (!check.allowed) {
+        await reply(`BLOCKED by financial guardrails:\n${check.reason}`);
+        break;
+      }
+      if (check.requiresApproval) {
+        await reply(`This transaction requires your approval:\n${check.reason}\n\nReply /checkout ${productId} to confirm.`);
+        break;
+      }
+
+      const links: string[] = [`Payment Links for: ${product.name} ($${product.priceUsd.toFixed(2)})`, "---"];
+
+      // Square checkout (card)
+      if ((!forceProvider || forceProvider === "square") && isSquareConfigured()) {
+        try {
+          const sq = await createSquareCheckout(product);
+          links.push(`Card Payment: ${sq.checkoutUrl}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          links.push(`Card: Error — ${msg}`);
+        }
+      } else if (!forceProvider || forceProvider === "square") {
+        links.push("Card: Square not configured (add SQUARE_ACCESS_TOKEN)");
+      }
+
+      // Coinbase checkout (crypto)
+      if ((!forceProvider || forceProvider === "crypto") && isCoinbaseConfigured()) {
+        try {
+          const cb = await createCoinbaseCharge(product);
+          links.push(`Crypto Payment: ${cb.checkoutUrl}`);
+          if (cb.expiresAt) links.push(`  Expires: ${new Date(cb.expiresAt).toLocaleString()}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          links.push(`Crypto: Error — ${msg}`);
+        }
+      } else if (!forceProvider || forceProvider === "crypto") {
+        links.push("Crypto: Coinbase not configured (add COINBASE_COMMERCE_API_KEY)");
+      }
+
+      await reply(links.join("\n"));
+      break;
+    }
+
+    case "/sales": {
+      const date = args[0]; // optional YYYY-MM-DD
+      const report = await generateDailyReport(date);
+      await reply(report);
+      break;
+    }
+
+    case "/revenue": {
+      const summary = await generateRevenueSummary();
+      await reply(summary);
+      break;
+    }
+
     default: {
       // Route all non-command messages (and unrecognized commands) to Claude AI
       const isCommand = text.startsWith("/");
@@ -376,9 +505,11 @@ function formatStatus(domain: string): string {
     `Current thread: ${domain}`,
     "",
     `AI Model: ${getCurrentModel()}`,
+    `Square: ${isSquareConfigured() ? "Connected" : "Not configured"}`,
+    `Coinbase: ${isCoinbaseConfigured() ? "Connected" : "Not configured"}`,
     "Memory search: online",
     "Heartbeat: running",
-    "Cron jobs: 4 scheduled",
+    "Cron jobs: 5 scheduled",
   ].join("\n");
 }
 
