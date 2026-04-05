@@ -4,12 +4,11 @@ import {
   authenticateMessage,
   detectPromptInjection,
 } from "../security/channel-auth.js";
-import {
-  logSecurity,
-  logSecurityWarning,
-} from "../security/audit-log.js";
+import { logSecurity, logSecurityWarning } from "../security/audit-log.js";
 import { handleCommand } from "./commands.js";
 import { ensureTodayNote } from "../memory/daily-notes.js";
+import { detectDomain } from "../threads/registry.js";
+import { getContext } from "../threads/context.js";
 
 export function createBot(): TelegramBot {
   const bot = new TelegramBot(env.TELEGRAM_BOT_TOKEN, { polling: true });
@@ -21,28 +20,36 @@ export function createBot(): TelegramBot {
     const chatId = msg.chat.id;
     const text = msg.text ?? "";
     const username = msg.from?.username ?? "unknown";
+    const threadId = msg.message_thread_id;
+    const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
 
-    // Authenticate the message source
-    const auth = authenticateMessage(chatId, "telegram");
+    // Authenticate — verify sender is owner regardless of group or DM
+    const auth = authenticateMessage(msg.from?.id ?? chatId, "telegram");
 
-    // Check for prompt injection regardless of source
+    // Detect which thread/domain this message belongs to
+    const threadConfig = await detectDomain(chatId, threadId, isGroup);
+
+    // Get or create thread context
+    const context = getContext(chatId, threadConfig.domain, threadId);
+
+    // Check for prompt injection
     if (detectPromptInjection(text)) {
       logSecurityWarning("PROMPT_INJECTION_ATTEMPT", "Prompt injection detected", {
         chatId: String(chatId),
         username,
+        thread: threadConfig.domain,
         text: text.substring(0, 200),
       });
 
-      if (!auth.authorized) {
-        return; // Silently ignore from unauthorized users
-      }
+      if (!auth.authorized) return;
       await bot.sendMessage(
         chatId,
-        "Warning: That message matched a prompt injection pattern. Flagging it."
+        "Warning: That message matched a prompt injection pattern. Flagging it.",
+        threadId ? { message_thread_id: threadId } : undefined
       );
     }
 
-    // Reject unauthorized messages
+    // Reject unauthorized senders
     if (!auth.authorized) {
       if (
         !env.TELEGRAM_OWNER_CHAT_ID ||
@@ -50,34 +57,59 @@ export function createBot(): TelegramBot {
       ) {
         await bot.sendMessage(
           chatId,
-          `ElderBot setup: Your chat ID is ${chatId}\n\nAdd to ~/.elderbot-secrets/.env:\nTELEGRAM_OWNER_CHAT_ID=${chatId}\n\nThen restart the bot.`
+          `ElderBot setup: Your user ID is ${msg.from?.id}\n\nAdd to ~/.elderbot-secrets/.env:\nTELEGRAM_OWNER_CHAT_ID=${msg.from?.id}\n\nThen restart the bot.`,
+          threadId ? { message_thread_id: threadId } : undefined
         );
-        logSecurity("AUTH_FAILURE", "Chat ID discovery — setup mode", {
-          chatId: String(chatId),
+        logSecurity("AUTH_FAILURE", "User ID discovery — setup mode", {
+          userId: String(msg.from?.id),
           username,
         });
         return;
       }
 
-      logSecurityWarning("UNAUTHORIZED_CHANNEL", "Message from unauthorized source ignored", {
+      logSecurityWarning("UNAUTHORIZED_CHANNEL", "Message from unauthorized sender ignored", {
+        userId: String(msg.from?.id),
         chatId: String(chatId),
         username,
+        thread: threadConfig.domain,
       });
       return;
     }
 
-    // --- Authenticated command processing ---
+    // SECURITY THREAD — report only, never execute commands
+    if (threadConfig.domain === "security" && !threadConfig.executePermissions) {
+      logSecurityWarning(
+        "UNAUTHORIZED_CHANNEL",
+        "Command attempted in security thread — ignored",
+        { text: text.substring(0, 100), threadId }
+      );
+      await bot.sendMessage(
+        chatId,
+        "Security thread is report-only. Commands are not executed here.\n\nUse the General thread for commands.",
+        { message_thread_id: threadId }
+      );
+      return;
+    }
+
+    // Authenticated command processing
     logSecurity("COMMAND_EXECUTED", "Processing command from owner", {
       chatId: String(chatId),
+      thread: threadConfig.domain,
+      threadId,
+      msgCount: context.messageCount,
       text: text.substring(0, 100),
     });
 
     try {
-      await handleCommand(bot, chatId, text);
+      await handleCommand(bot, chatId, text, threadId, threadConfig);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logSecurityWarning("COMMAND_EXECUTED", `Command error: ${message}`);
-      await bot.sendMessage(chatId, `Error: ${message}`);
+      await bot.sendMessage(
+        chatId,
+        `Error: ${message}`,
+        threadId ? { message_thread_id: threadId } : undefined
+      );
     }
   });
 

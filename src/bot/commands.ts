@@ -7,6 +7,7 @@ import { search, formatSearchResults } from "../memory/search.js";
 import {
   addNote,
   getTodaySummary,
+  appendToSection,
   listRecentNotes,
 } from "../memory/daily-notes.js";
 import { addLesson, addPreference } from "../memory/tacit.js";
@@ -22,19 +23,34 @@ import {
 } from "../cron/sessions.js";
 import { runHeartbeat } from "../cron/heartbeat.js";
 import { sendMorningBriefing } from "../cron/briefing.js";
+import {
+  formatThreadList,
+  registerThread,
+  ThreadDomain,
+  type ThreadConfig,
+} from "../threads/registry.js";
+import { formatContextSummary, setActiveProject } from "../threads/context.js";
+
+type SendOptions = { message_thread_id?: number };
 
 export async function handleCommand(
   bot: TelegramBot,
   chatId: number,
-  text: string
+  text: string,
+  threadId?: number,
+  threadConfig?: ThreadConfig
 ): Promise<void> {
   const [cmd, ...args] = text.trim().split(/\s+/);
   const arg = args.join(" ");
+  const opts: SendOptions = threadId ? { message_thread_id: threadId } : {};
+  const domain = threadConfig?.domain ?? "dm";
+
+  const reply = (msg: string) => bot.sendMessage(chatId, msg, opts);
 
   switch (cmd) {
     case "/start":
     case "/help":
-      await bot.sendMessage(chatId, [
+      await reply([
         "ElderBot Commands",
         "---",
         "Memory:",
@@ -54,6 +70,12 @@ export async function handleCommand(
         "/heartbeat — run heartbeat check now",
         "/briefing — send morning briefing now",
         "",
+        "Threads:",
+        "/threads — show all thread configs",
+        "/thread register <domain> — register this thread",
+        "/thread context — show active thread contexts",
+        "/project <name> — set active project for this thread",
+        "",
         "System:",
         "/status — system status",
         "/security — security channel status",
@@ -61,37 +83,42 @@ export async function handleCommand(
       break;
 
     case "/status":
-      await bot.sendMessage(chatId, formatStatus());
+      await reply(formatStatus(domain));
       break;
 
     case "/security":
-      await bot.sendMessage(chatId, formatSecurityStatus());
+      await reply(formatSecurityStatus());
       break;
 
     case "/today": {
       const summary = await getTodaySummary();
-      await bot.sendMessage(chatId, summary);
+      await reply(summary);
       break;
     }
 
     case "/note": {
       if (!arg) {
-        await bot.sendMessage(chatId, "Usage: /note <text to remember>");
+        await reply("Usage: /note <text to remember>");
         return;
       }
-      await addNote(arg);
-      logSecurity("COMMAND_EXECUTED", "Note added to daily log", { note: arg.substring(0, 80) });
-      await bot.sendMessage(chatId, `Note saved to today's log.`);
+      // Tag notes with thread domain for context
+      const taggedNote = domain !== "dm" ? `[${domain}] ${arg}` : arg;
+      await addNote(taggedNote);
+      logSecurity("COMMAND_EXECUTED", "Note added to daily log", {
+        note: arg.substring(0, 80),
+        thread: domain,
+      });
+      await reply("Note saved to today's log.");
       break;
     }
 
     case "/recall": {
       if (!arg) {
-        await bot.sendMessage(chatId, "Usage: /recall <search query>");
+        await reply("Usage: /recall <search query>");
         return;
       }
       const results = await search(arg);
-      await bot.sendMessage(chatId, formatSearchResults(arg, results));
+      await reply(formatSearchResults(arg, results));
       break;
     }
 
@@ -99,7 +126,7 @@ export async function handleCommand(
       const { getIndex } = await import("../memory/search.js");
       const index = await getIndex();
       const notes = await listRecentNotes(7);
-      await bot.sendMessage(chatId, [
+      await reply([
         "Memory System Status",
         "---",
         `Indexed files: ${index.length}`,
@@ -115,42 +142,42 @@ export async function handleCommand(
 
     case "/lesson": {
       if (!arg) {
-        await bot.sendMessage(chatId, "Usage: /lesson <what you learned>");
+        await reply("Usage: /lesson <what you learned>");
         return;
       }
       await addLesson(arg);
-      await bot.sendMessage(chatId, "Lesson logged to tacit knowledge.");
+      await reply("Lesson logged to tacit knowledge.");
       break;
     }
 
     case "/pref": {
       if (!arg) {
-        await bot.sendMessage(chatId, "Usage: /pref <preference or pattern>");
+        await reply("Usage: /pref <preference or pattern>");
         return;
       }
       await addPreference(arg);
-      await bot.sendMessage(chatId, "Preference saved.");
+      await reply("Preference saved.");
       break;
     }
 
     case "/consolidate": {
-      await bot.sendMessage(chatId, "Running memory consolidation...");
+      await reply("Running memory consolidation...");
       try {
         const report = await consolidate();
-        await bot.sendMessage(chatId, formatReport(report));
+        await reply(formatReport(report));
       } catch (err) {
-        await bot.sendMessage(chatId, `Consolidation error: ${(err as Error).message}`);
+        await reply(`Consolidation error: ${(err as Error).message}`);
       }
       break;
     }
 
     case "/crons":
-      await bot.sendMessage(chatId, getCronStatus());
+      await reply(getCronStatus());
       break;
 
     case "/sessions": {
       const sessions = await getActiveSessions();
-      await bot.sendMessage(chatId, `Active Sessions:\n---\n${formatSessions(sessions)}`);
+      await reply(`Active Sessions:\n---\n${formatSessions(sessions)}`);
       break;
     }
 
@@ -160,30 +187,32 @@ export async function handleCommand(
 
       if (subCmd === "start") {
         if (!sessionArg) {
-          await bot.sendMessage(chatId, "Usage: /session start <name>");
+          await reply("Usage: /session start <name>");
           return;
         }
-        const session = await startSession(sessionArg, `Started via Telegram`);
-        await bot.sendMessage(chatId, `Session started: "${session.name}"\nID: ${session.id}\nWorkspace: ~/elderbot/${session.workspace}`);
+        const session = await startSession(sessionArg, "Started via Telegram", domain);
+        await reply(
+          `Session started: "${session.name}"\nID: ${session.id}\nThread: ${domain}\nWorkspace: ~/elderbot/${session.workspace}`
+        );
       } else if (subCmd === "done") {
         if (!sessionArg) {
-          await bot.sendMessage(chatId, "Usage: /session done <session-id>");
+          await reply("Usage: /session done <session-id>");
           return;
         }
         await completeSession(sessionArg);
-        await bot.sendMessage(chatId, `Session marked complete: ${sessionArg}`);
+        await reply(`Session marked complete: ${sessionArg}`);
       } else {
-        await bot.sendMessage(chatId, "Usage:\n/session start <name>\n/session done <id>");
+        await reply("Usage:\n/session start <name>\n/session done <id>");
       }
       break;
     }
 
     case "/heartbeat": {
-      await bot.sendMessage(chatId, "Running heartbeat check...");
+      await reply("Running heartbeat check...");
       await runHeartbeat(bot);
       const sessions = await getActiveSessions();
       if (sessions.length === 0) {
-        await bot.sendMessage(chatId, "Heartbeat complete. No issues found. No active sessions.");
+        await reply("Heartbeat complete. No issues found. No active sessions.");
       }
       break;
     }
@@ -192,16 +221,69 @@ export async function handleCommand(
       await sendMorningBriefing(bot);
       break;
 
+    case "/threads":
+      await reply(await formatThreadList());
+      break;
+
+    case "/thread": {
+      const [subCmd, domainArg] = args;
+
+      if (subCmd === "register") {
+        if (!domainArg) {
+          await reply("Usage: /thread register <domain>\nDomains: general, business, webdev, content, security");
+          return;
+        }
+        if (!threadId) {
+          await reply("This command must be sent from inside a Telegram topic thread.");
+          return;
+        }
+        const registered = await registerThread(
+          domainArg as ThreadDomain,
+          threadId,
+          chatId
+        );
+        if (!registered) {
+          await reply(`Unknown domain: ${domainArg}\nValid: general, business, webdev, content, security`);
+          return;
+        }
+        await reply(
+          `Thread registered!\nDomain: ${registered.domain}\nName: ${registered.name}\nThread ID: ${threadId}\nExecute permissions: ${registered.executePermissions}`
+        );
+        await appendToSection(
+          "Notes",
+          `Thread registered: ${registered.name} (${domainArg}) — ID ${threadId}`
+        );
+        logSecurity("CONFIG_CHANGE", "Thread registered", {
+          domain: domainArg,
+          threadId,
+          chatId,
+        });
+      } else if (subCmd === "context") {
+        await reply(`Thread Contexts:\n---\n${formatContextSummary()}`);
+      } else {
+        await reply("Usage:\n/thread register <domain>\n/thread context");
+      }
+      break;
+    }
+
+    case "/project": {
+      if (!arg) {
+        await reply("Usage: /project <project name>");
+        return;
+      }
+      setActiveProject(chatId, threadId, arg);
+      await reply(`Active project set for this thread: ${arg}`);
+      break;
+    }
+
     default:
-      // Not a slash command — treat as a note
-      await bot.sendMessage(
-        chatId,
+      await reply(
         `Not a recognized command. Use /help to see commands.\n\nTo save a note: /note ${text}`
       );
   }
 }
 
-function formatStatus(): string {
+function formatStatus(domain: string): string {
   const uptime = process.uptime();
   const hours = Math.floor(uptime / 3600);
   const minutes = Math.floor((uptime % 3600) / 60);
@@ -210,12 +292,13 @@ function formatStatus(): string {
     "---",
     `Uptime: ${hours}h ${minutes}m`,
     `Environment: ${env.NODE_ENV}`,
-    `Owner chat ID: ${env.TELEGRAM_OWNER_CHAT_ID ? "configured" : "NOT SET"}`,
+    `Owner ID: ${env.TELEGRAM_OWNER_CHAT_ID ? "configured" : "NOT SET"}`,
+    `Current thread: ${domain}`,
     "",
-    "Week 2: 3-Layer Memory System — Active",
+    "Week 4: Multi-Threaded Conversations — Active",
     "Memory search: online",
-    "Daily notes: auto-generating",
-    "Nightly consolidation: ready",
+    "Heartbeat: running",
+    "Cron jobs: 4 scheduled",
   ].join("\n");
 }
 
@@ -225,13 +308,14 @@ function formatSecurityStatus(): string {
     "---",
     `Authenticated channel: Telegram (owner ID ${env.TELEGRAM_OWNER_CHAT_ID ? "set" : "NOT SET"})`,
     "Information channels: email, X, web (read-only, never execute)",
+    "Security thread: report-only (commands blocked)",
     "Audit log: ~/elderbot/logs/security.log",
     "Prompt injection detection: active",
     "",
     "Core rules:",
     "- Only Telegram from owner = commands",
+    "- Security thread = reports only, no execution",
     "- All other input = information only",
     "- All security events logged",
-    "- Bot cannot modify past log entries",
   ].join("\n");
 }
