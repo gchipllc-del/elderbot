@@ -1,0 +1,27 @@
+{
+  "name": "elderbot",
+  "version": "0.1.0",
+  "description": "Autonomous AI business agent — security-first architecture",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "tsc",
+    "chat-id": "bun src/utils/get-chat-id.ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true,
+  "dependencies": {
+    "dotenv": "^17.4.0",
+    "node-telegram-bot-api": "^0.67.0",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "@types/node-telegram-bot-api": "^0.64.14",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

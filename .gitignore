@@ -1,0 +1,23 @@
+# Secrets — NEVER commit
+.env
+*.secret
+*.key
+.elderbot-secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+dist/
+
+# qmD index (regenerated)
+life/.qmd-index/
+
+# Logs (security.log stays local)
+logs/*.log
+
+# Temp
+tmp/
+*.tmp

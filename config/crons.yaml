@@ -1,0 +1,19 @@
+# ElderBot Cron Configuration
+# All scheduled jobs defined here — bot cannot create new jobs without approval
+# Full implementation in Week 3: Heartbeat & Cron Jobs
+
+jobs: []
+  # - name: heartbeat
+  #   schedule: "*/30 6-22 * * *"
+  #   command: "check active projects, restart dead sessions, report completions"
+  #   enabled: false
+
+  # - name: morning-briefing
+  #   schedule: "0 6 * * *"
+  #   command: "send daily status to Telegram"
+  #   enabled: false
+
+  # - name: nightly-consolidation
+  #   schedule: "0 2 * * *"
+  #   command: "review conversations, update memory, re-index"
+  #   enabled: false
