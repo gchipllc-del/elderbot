@@ -18,6 +18,7 @@ import { runHeartbeat } from "./heartbeat.js";
 import { sendMorningBriefing } from "./briefing.js";
 import { consolidate } from "../memory/consolidate.js";
 import { sendDailySalesReport } from "./sales-report.js";
+import { checkMentions, runContentMiner, runDraftExpiry } from "./social.js";
 import { logSecurity } from "../security/audit-log.js";
 import { env } from "../config/env.js";
 
@@ -64,6 +65,27 @@ const jobRegistry: CronJob[] = [
     name: "daily-sales-report",
     schedule: "0 20 * * *",
     description: "Revenue summary → Telegram at 8 PM",
+    enabled: true,
+    runCount: 0,
+  },
+  {
+    name: "x-mention-check",
+    schedule: "*/30 8-22 * * *",
+    description: "Check X mentions and auto-reply",
+    enabled: true,
+    runCount: 0,
+  },
+  {
+    name: "x-content-miner",
+    schedule: "0 18 * * *",
+    description: "Mine daily activity for tweet ideas → 6 PM",
+    enabled: true,
+    runCount: 0,
+  },
+  {
+    name: "x-draft-expiry",
+    schedule: "0 * * * *",
+    description: "Expire unapproved tweet drafts (hourly)",
     enabled: true,
     runCount: 0,
   },
@@ -146,6 +168,42 @@ export function startAllCrons(bot: TelegramBot): void {
         markRun("daily-sales-report");
         await sendDailySalesReport(bot).catch((e) =>
           logSecurity("COMMAND_EXECUTED", `Sales report error: ${e.message}`)
+        );
+      })
+    );
+  }
+
+  // X mention check — every 30 min, 8am-10pm
+  if (jobRegistry.find((j) => j.name === "x-mention-check")?.enabled) {
+    activeTasks.push(
+      cron.schedule("*/30 8-22 * * *", async () => {
+        markRun("x-mention-check");
+        await checkMentions(bot).catch((e) =>
+          logSecurity("COMMAND_EXECUTED", `Mention check error: ${e.message}`)
+        );
+      })
+    );
+  }
+
+  // X content miner — 6 PM daily
+  if (jobRegistry.find((j) => j.name === "x-content-miner")?.enabled) {
+    activeTasks.push(
+      cron.schedule("0 18 * * *", async () => {
+        markRun("x-content-miner");
+        await runContentMiner(bot).catch((e) =>
+          logSecurity("COMMAND_EXECUTED", `Content miner error: ${e.message}`)
+        );
+      })
+    );
+  }
+
+  // X draft expiry — hourly
+  if (jobRegistry.find((j) => j.name === "x-draft-expiry")?.enabled) {
+    activeTasks.push(
+      cron.schedule("0 * * * *", async () => {
+        markRun("x-draft-expiry");
+        await runDraftExpiry().catch((e) =>
+          logSecurity("COMMAND_EXECUTED", `Draft expiry error: ${e.message}`)
         );
       })
     );

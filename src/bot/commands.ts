@@ -42,6 +42,17 @@ import { createSquareCheckout, isSquareConfigured } from "../payments/square.js"
 import { createCoinbaseCharge, isCoinbaseConfigured } from "../payments/coinbase.js";
 import { checkSpendingLimit } from "../payments/guardrails.js";
 import { generateDailyReport, generateRevenueSummary } from "../payments/reporting.js";
+import { isXConfigured, postTweet } from "../social/x-client.js";
+import {
+  approveDraft,
+  rejectDraft,
+  getPendingDrafts,
+  getRecentDrafts,
+  formatDraftList,
+  markPosted,
+} from "../social/drafts.js";
+import { checkContentSafety } from "../social/content-safety.js";
+import { getMentionStats } from "../social/mentions.js";
 
 type SendOptions = { message_thread_id?: number };
 
@@ -107,6 +118,14 @@ export async function handleCommand(
         "/checkout <product-id> — generate payment links",
         "/sales — today's sales report",
         "/revenue — full revenue dashboard",
+        "",
+        "Social:",
+        "/tweet draft <text> — draft an original tweet",
+        "/tweet approve <id> — approve a draft for posting",
+        "/tweet reject <id> — reject a draft",
+        "/tweet pending — view pending drafts",
+        "/tweet recent — view recent drafts",
+        "/tweet stats — X mention stats",
         "",
         "System:",
         "/status — system status",
@@ -317,6 +336,80 @@ export async function handleCommand(
       break;
     }
 
+    // ---- Social Commands ----
+
+    case "/tweet": {
+      const [subCmd, ...rest] = args;
+      const tweetArg = rest.join(" ");
+
+      if (subCmd === "draft") {
+        if (!tweetArg) {
+          await reply("Usage: /tweet draft <your tweet text>");
+          break;
+        }
+        if (tweetArg.length > 280) {
+          await reply(`Tweet too long (${tweetArg.length}/280). Shorten it.`);
+          break;
+        }
+        const safety = checkContentSafety(tweetArg);
+        if (!safety.safe) {
+          await reply(`Content blocked:\n${safety.violations.map((v) => `- ${v}`).join("\n")}`);
+          break;
+        }
+        const { createDraft: makeDraft } = await import("../social/drafts.js");
+        const draft = await makeDraft(tweetArg, "original", { source: "manual" });
+        await reply(`Tweet drafted (pending approval):\n"${tweetArg}"\n\nID: ${draft.id}\nApprove: /tweet approve ${draft.id}`);
+      } else if (subCmd === "approve") {
+        const draftId = rest[0];
+        if (!draftId) {
+          await reply("Usage: /tweet approve <draft-id>");
+          break;
+        }
+        const draft = await approveDraft(draftId);
+        if (!draft) {
+          await reply(`Draft not found or not pending: ${draftId}`);
+          break;
+        }
+        // Post immediately upon approval
+        if (isXConfigured()) {
+          try {
+            const posted = await postTweet(draft.content, draft.inReplyToId);
+            if (posted) {
+              await markPosted(draft.id, posted.id);
+              await reply(`Tweet posted!\n"${draft.content}"\n\nTweet ID: ${posted.id}`);
+            } else {
+              await reply("Approved but post failed. Will retry on next cron cycle.");
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await reply(`Approved but post error: ${msg}`);
+          }
+        } else {
+          await reply(`Draft approved: "${draft.content}"\n\nX not configured yet — will post when API keys are set.`);
+        }
+      } else if (subCmd === "reject") {
+        const draftId = rest[0];
+        if (!draftId) {
+          await reply("Usage: /tweet reject <draft-id>");
+          break;
+        }
+        const draft = await rejectDraft(draftId);
+        await reply(draft ? `Draft rejected: ${draftId}` : `Draft not found or not pending: ${draftId}`);
+      } else if (subCmd === "pending") {
+        const pending = await getPendingDrafts();
+        await reply(formatDraftList(pending));
+      } else if (subCmd === "recent") {
+        const recent = await getRecentDrafts(10);
+        await reply(formatDraftList(recent));
+      } else if (subCmd === "stats") {
+        const stats = await getMentionStats();
+        await reply(stats);
+      } else {
+        await reply("Usage: /tweet draft|approve|reject|pending|recent|stats");
+      }
+      break;
+    }
+
     // ---- Business Commands ----
 
     case "/product": {
@@ -507,9 +600,10 @@ function formatStatus(domain: string): string {
     `AI Model: ${getCurrentModel()}`,
     `Square: ${isSquareConfigured() ? "Connected" : "Not configured"}`,
     `Coinbase: ${isCoinbaseConfigured() ? "Connected" : "Not configured"}`,
+    `X/Twitter: ${isXConfigured() ? "Connected" : "Not configured"}`,
     "Memory search: online",
     "Heartbeat: running",
-    "Cron jobs: 5 scheduled",
+    "Cron jobs: 8 scheduled",
   ].join("\n");
 }
 
