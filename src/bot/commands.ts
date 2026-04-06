@@ -53,6 +53,21 @@ import {
 } from "../social/drafts.js";
 import { checkContentSafety } from "../social/content-safety.js";
 import { getMentionStats } from "../social/mentions.js";
+import {
+  createTask,
+  runRalphLoop,
+  approveTask,
+  getActiveTasks,
+  getAllTasks,
+  getDashboard,
+  formatTaskList,
+  formatDashboard,
+} from "../delegation/task-manager.js";
+import { getOpenTickets, formatTicketList, closeTicket } from "../email/support.js";
+import { formatRoutes } from "../email/notifications.js";
+import { isEmailConfigured } from "../email/gmail-client.js";
+import { detectScams, formatScamAlert, formatScamSummary } from "../elder-safety/scam-detector.js";
+import { getAllElders, formatElderProfile } from "../elder-safety/onboarding.js";
 
 type SendOptions = { message_thread_id?: number };
 
@@ -126,6 +141,19 @@ export async function handleCommand(
         "/tweet pending — view pending drafts",
         "/tweet recent — view recent drafts",
         "/tweet stats — X mention stats",
+        "",
+        "Delegation:",
+        "/delegate <task> — create & run a delegated task",
+        "/delegate status — show all tasks",
+        "/delegate approve <id> — approve completed task",
+        "/delegate dashboard — project overview",
+        "",
+        "Support & Notifications:",
+        "/tickets — open support tickets",
+        "/ticket close <id> — close a ticket",
+        "/notifications — notification routing config",
+        "/scamcheck <text> — test scam detection",
+        "/elders — list elder profiles",
         "",
         "System:",
         "/status — system status",
@@ -520,6 +548,101 @@ export async function handleCommand(
       break;
     }
 
+    // ---- Delegation Commands (Week 8) ----
+
+    case "/delegate": {
+      const [subCmd, ...rest] = args;
+      const delegateArg = rest.join(" ");
+
+      if (subCmd === "status") {
+        const tasks = await getAllTasks();
+        await reply(formatTaskList(tasks.slice(-10)));
+      } else if (subCmd === "approve") {
+        const taskId = rest[0];
+        if (!taskId) { await reply("Usage: /delegate approve <task-id>"); break; }
+        const task = await approveTask(taskId);
+        await reply(task ? `Task approved: ${task.prd.title}` : `Task not found or not ready for approval: ${taskId}`);
+      } else if (subCmd === "dashboard") {
+        const dash = await getDashboard();
+        await reply(formatDashboard(dash));
+      } else if (subCmd && subCmd !== "help") {
+        // Create and run a new delegated task
+        const fullDesc = `${subCmd} ${delegateArg}`.trim();
+        await reply(`Creating task: "${fullDesc}"\nGenerating PRD and starting Ralph loop...`);
+        try {
+          const task = await createTask(fullDesc);
+          await reply(`PRD created: ${task.prd.title}\nTask ID: ${task.id}\nRunning Ralph loop 1/${task.maxLoops}...`);
+          const result = await runRalphLoop(task.id);
+          if (result) {
+            const statusMsg = result.status === "approval"
+              ? `QA PASSED! Ready for approval.\n/delegate approve ${result.id}`
+              : result.status === "needs-fix"
+              ? `QA found issues — will iterate. Loop ${result.loopCount}/${result.maxLoops}`
+              : `Status: ${result.status}`;
+            await reply(`${task.prd.title}\n${statusMsg}`);
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          await reply(`Delegation error: ${msg}`);
+        }
+      } else {
+        await reply("Usage: /delegate <task description> | status | approve <id> | dashboard");
+      }
+      break;
+    }
+
+    // ---- Support & Notification Commands (Week 9) ----
+
+    case "/tickets": {
+      const tickets = await getOpenTickets();
+      await reply(formatTicketList(tickets));
+      break;
+    }
+
+    case "/ticket": {
+      const [subCmd2] = args;
+      if (subCmd2 === "close") {
+        const ticketId = args[1];
+        if (!ticketId) { await reply("Usage: /ticket close <ticket-id>"); break; }
+        const closed = await closeTicket(ticketId);
+        await reply(closed ? `Ticket ${ticketId} closed.` : `Ticket not found: ${ticketId}`);
+      } else {
+        await reply("Usage: /ticket close <ticket-id>");
+      }
+      break;
+    }
+
+    case "/notifications": {
+      const routes = await formatRoutes();
+      await reply(routes);
+      break;
+    }
+
+    // ---- Elder Safety Commands (Week 10) ----
+
+    case "/scamcheck": {
+      if (!arg) { await reply("Usage: /scamcheck <text to check for scam patterns>"); break; }
+      const detections = detectScams(arg);
+      if (detections.length === 0) {
+        await reply("No scam patterns detected in this text. Looks safe.");
+      } else {
+        const alerts = detections.map(formatScamAlert).join("\n\n");
+        await reply(alerts);
+      }
+      break;
+    }
+
+    case "/elders": {
+      const elders = await getAllElders();
+      if (elders.length === 0) {
+        await reply("No elder profiles yet. Elders can onboard by messaging the bot directly.");
+      } else {
+        const profiles = elders.map(formatElderProfile).join("\n\n---\n\n");
+        await reply(profiles);
+      }
+      break;
+    }
+
     default: {
       // Route all non-command messages (and unrecognized commands) to Claude AI
       const isCommand = text.startsWith("/");
@@ -601,7 +724,10 @@ function formatStatus(domain: string): string {
     `Square: ${isSquareConfigured() ? "Connected" : "Not configured"}`,
     `Coinbase: ${isCoinbaseConfigured() ? "Connected" : "Not configured"}`,
     `X/Twitter: ${isXConfigured() ? "Connected" : "Not configured"}`,
+    `Email: ${isEmailConfigured() ? "Connected" : "Not configured"}`,
     "Memory search: online",
+    "Delegation: online",
+    "Scam detection: active",
     "Heartbeat: running",
     "Cron jobs: 8 scheduled",
   ].join("\n");

@@ -21,6 +21,8 @@ export const env = {
   TWITTER_API_SECRET: process.env.TWITTER_API_SECRET ?? "",
   TWITTER_ACCESS_TOKEN: process.env.TWITTER_ACCESS_TOKEN ?? "",
   TWITTER_ACCESS_SECRET: process.env.TWITTER_ACCESS_SECRET ?? "",
+  EMAIL_ADDRESS: process.env.EMAIL_ADDRESS ?? "",
+  EMAIL_APP_PASSWORD: process.env.EMAIL_APP_PASSWORD ?? "",
   NODE_ENV: process.env.NODE_ENV ?? "development",
   ELDERBOT_HOME: resolve(homedir(), "elderbot"),
 } as const;
